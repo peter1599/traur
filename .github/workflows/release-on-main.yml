@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm \
+          docker run --rm --interactive \
             --env GITHUB_SHA="${COMMIT_SHA}" \
             --env GITHUB_RUN_NUMBER="${RUN_NUMBER}" \
             --env GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
