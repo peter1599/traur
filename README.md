@@ -269,6 +269,23 @@ Patterns derived from real AUR malware incidents:
 
 Categories: download-and-execute, reverse shells, credential theft, persistence mechanisms, privilege escalation, C2/exfiltration, cryptocurrency mining, code obfuscation, kernel module loading, environment variable theft, system reconnaissance.
 
+## Automatic GitHub releases
+
+Every push to `main` runs `.github/workflows/release-on-main.yml`:
+
+1. Runs `cargo test --locked`.
+2. Builds release binaries.
+3. Creates prerelease tag `v<CargoVersion>-<commit-sha>`.
+4. Creates GitHub release notes from tip commit message.
+
+Example tag:
+
+```text
+v0.4.1-a1b2c3d4e5f6
+```
+
+These are development snapshots. Versioned stable releases still need a Cargo version bump and the normal package/AUR release workflow.
+
 ## License
 
 MIT
