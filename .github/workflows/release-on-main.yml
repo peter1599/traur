@@ -99,7 +99,7 @@ jobs:
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
           short_sha=${COMMIT_SHA:0:12}
           tag="v${version}-${short_sha}"
-          title=$(git log -1 --format=%s "${COMMIT_SHA}")
+          title="v${version}"
           notes=$(git log -1 --format=%B "${COMMIT_SHA}")
 
           if gh release view "${tag}" >/dev/null 2>&1; then
