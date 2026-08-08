@@ -274,14 +274,22 @@ Categories: download-and-execute, reverse shells, credential theft, persistence 
 Every push to `main` runs `.github/workflows/release-on-main.yml`:
 
 1. Runs `cargo test --locked`.
-2. Builds release binaries.
-3. Creates prerelease tag `v<CargoVersion>-<commit-sha>`.
-4. Creates GitHub release notes from tip commit message.
+2. Builds release binaries inside Arch Linux.
+3. Creates a pacman-installable `.pkg.tar.zst` package and `.sha256` file.
+4. Creates prerelease tag `v<CargoVersion>-<commit-sha>`.
+5. Creates GitHub release notes from tip commit message and uploads both assets.
 
 Example tag:
 
 ```text
 v0.4.1-a1b2c3d4e5f6
+```
+
+Download the `.pkg.tar.zst` asset, verify it, then install it:
+
+```bash
+sha256sum -c traur-*.pkg.tar.zst.sha256
+sudo pacman -U traur-*.pkg.tar.zst
 ```
 
 These are development snapshots. Versioned stable releases still need a Cargo version bump and the normal package/AUR release workflow.

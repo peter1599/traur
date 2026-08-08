@@ -27,8 +27,67 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
-      - name: Build release binaries
-        run: cargo build --locked --release
+      - name: Build installable Arch package
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --env GITHUB_SHA="${COMMIT_SHA}" \
+            --env GITHUB_RUN_NUMBER="${RUN_NUMBER}" \
+            --env GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace \
+            archlinux:base-devel \
+            bash -euo pipefail <<'CONTAINER_SCRIPT'
+          pacman -Syu --noconfirm --needed git rust cargo zstd
+
+          host_uid=$(stat -c '%u' /workspace)
+          useradd --create-home --uid "${host_uid}" builder
+          chown -R "${host_uid}" /workspace
+
+          cat > /tmp/build-traur-package.sh <<'BUILD_SCRIPT'
+          set -euo pipefail
+
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          pkgver="${version}.r${GITHUB_RUN_NUMBER}"
+          workdir=$(mktemp -d)
+          trap 'rm -rf "${workdir}"' EXIT
+
+          archive="${workdir}/traur-${pkgver}.tar.gz"
+          git archive --format=tar.gz --prefix="traur-${pkgver}/" "${GITHUB_SHA}" > "${archive}"
+          checksum=$(sha256sum "${archive}" | awk '{print $1}')
+
+          mkdir -p "${workdir}/package"
+          cp pkg/PKGBUILD "${workdir}/package/PKGBUILD"
+          cp "${archive}" "${workdir}/package/"
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${pkgver}/" \
+            -e "s|^url=.*|url='https://github.com/${GITHUB_REPOSITORY}'|" \
+            -e "s|^source=.*|source=('traur-${pkgver}.tar.gz')|" \
+            -e "s|^sha256sums=.*|sha256sums=('${checksum}')|" \
+            "${workdir}/package/PKGBUILD"
+
+          cd "${workdir}/package"
+          makepkg --noconfirm --clean --cleanbuild
+          mkdir -p /workspace/dist
+          cp ./*.pkg.tar.* /workspace/dist/
+          BUILD_SCRIPT
+          chmod +x /tmp/build-traur-package.sh
+          runuser -u builder -- env \
+            HOME=/home/builder \
+            GITHUB_SHA="${GITHUB_SHA}" \
+            GITHUB_RUN_NUMBER="${GITHUB_RUN_NUMBER}" \
+            GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+            /tmp/build-traur-package.sh
+          CONTAINER_SCRIPT
+
+          asset=$(find dist -maxdepth 1 -type f -name '*.pkg.tar.*' -print -quit)
+          test -n "${asset}"
+          asset_name=$(basename "${asset}")
+          (cd dist && sha256sum "${asset_name}" > "${asset_name}.sha256")
 
       - name: Create GitHub prerelease
         env:
@@ -48,7 +107,12 @@ jobs:
             exit 0
           fi
 
+          asset=$(find dist -maxdepth 1 -type f -name '*.pkg.tar.*' -print -quit)
+          test -n "${asset}"
+
           gh release create "${tag}" \
+            "${asset}" \
+            "${asset}.sha256" \
             --target "${COMMIT_SHA}" \
             --title "${title}" \
             --notes "${notes}" \
