@@ -127,11 +127,14 @@ jobs:
             -e "s|^source=.*|source=('traur-${pkgver}.tar.gz')|" \
             -e "s|^sha256sums=.*|sha256sums=('${checksum}')|" \
             "${workdir}/package/PKGBUILD"
+          printf '%s\n' "options=('!debug')" >> "${workdir}/package/PKGBUILD"
 
           cd "${workdir}/package"
           makepkg --noconfirm --clean --cleanbuild
+          main_package=$(find . -maxdepth 1 -type f -name "traur-${pkgver}-*.pkg.tar.*" -print -quit)
+          test -n "${main_package}"
           mkdir -p /workspace/dist
-          cp ./*.pkg.tar.* /workspace/dist/
+          cp "${main_package}" /workspace/dist/
           BUILD_SCRIPT
           chmod +x /tmp/build-traur-package.sh
           runuser -u builder -- env \
@@ -142,7 +145,7 @@ jobs:
             /tmp/build-traur-package.sh
           CONTAINER_SCRIPT
 
-          asset=$(find dist -maxdepth 1 -type f -name '*.pkg.tar.*' -print -quit)
+          asset=$(find dist -maxdepth 1 -type f -name "traur-${PKGVER}-*.pkg.tar.*" -print -quit)
           test -n "${asset}"
           asset_name=$(basename "${asset}")
           (cd dist && sha256sum "${asset_name}" > "${asset_name}.sha256")
@@ -153,6 +156,7 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           RELEASE_TAG: ${{ steps.release_metadata.outputs.tag }}
           RELEASE_TITLE: ${{ steps.release_metadata.outputs.title }}
+          PACKAGE_VERSION: ${{ steps.release_metadata.outputs.pkgver }}
           PRERELEASE: ${{ steps.release_metadata.outputs.prerelease }}
         run: |
           set -euo pipefail
@@ -169,7 +173,7 @@ jobs:
             exit 0
           fi
 
-          asset=$(find dist -maxdepth 1 -type f -name '*.pkg.tar.*' -print -quit)
+          asset=$(find dist -maxdepth 1 -type f -name "traur-${PACKAGE_VERSION}-*.pkg.tar.*" -print -quit)
           test -n "${asset}"
 
           release_args=(
