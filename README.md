@@ -276,14 +276,30 @@ Every push to `main` runs `.github/workflows/release-on-main.yml`:
 1. Runs `cargo test --locked`.
 2. Builds release binaries inside Arch Linux.
 3. Creates a pacman-installable `.pkg.tar.zst` package and `.sha256` file.
-4. Creates prerelease tag `v<CargoVersion>-<commit-sha>`.
-5. Creates GitHub release notes from tip commit message and uploads both assets.
+4. Uses tip commit `Release-Type` trailer to choose release kind.
+5. Uses full tip commit message as release notes and uploads both assets.
 
-Example tag:
+No trailer, or `Release-Type: prerelease`, creates a snapshot:
 
 ```text
 v0.4.1-a1b2c3d4e5f6
+traur-0.4.1.r12-1-x86_64.pkg.tar.zst
 ```
+
+`Release-Type: stable` creates normal versioned release:
+
+```text
+v0.4.1
+traur-0.4.1-1-x86_64.pkg.tar.zst
+```
+
+Add trailer to commit message footer:
+
+```text
+Release-Type: stable
+```
+
+Use `Release-Type: prerelease` for explicit snapshot builds. Stable releases need Cargo version bump; workflow refuses invalid release types.
 
 Download the `.pkg.tar.zst` asset, verify it, then install it:
 
@@ -291,8 +307,6 @@ Download the `.pkg.tar.zst` asset, verify it, then install it:
 sha256sum -c traur-*.pkg.tar.zst.sha256
 sudo pacman -U traur-*.pkg.tar.zst
 ```
-
-These are development snapshots. Versioned stable releases still need a Cargo version bump and the normal package/AUR release workflow.
 
 ## License
 

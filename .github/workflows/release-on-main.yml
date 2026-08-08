@@ -1,4 +1,4 @@
-name: Release main snapshots
+name: Release main builds
 
 on:
   push:
@@ -8,9 +8,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: Test, build, and release snapshot
+    name: Test, build, and release
     runs-on: ubuntu-latest
 
     steps:
@@ -18,6 +22,60 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
+      - name: Determine release type
+        id: release_metadata
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          version=$(sed -n 's/^version = "\([^\"]*\)"/\1/p' Cargo.toml | head -n 1)
+          test -n "${version}"
+          short_sha="${COMMIT_SHA:0:12}"
+
+          mapfile -t release_types < <(
+            git show -s --format='%(trailers:key=Release-Type,valueonly,unfold)' "${COMMIT_SHA}" |
+              sed -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+          )
+          if (( ${#release_types[@]} > 1 )); then
+            echo "Multiple Release-Type trailers found; use one." >&2
+            exit 1
+          fi
+
+          requested_type="${release_types[0]:-prerelease}"
+          requested_type="${requested_type,,}"
+          case "${requested_type}" in
+            stable|release)
+              release_type=stable
+              pkgver="${version}"
+              tag="v${version}"
+              prerelease=false
+              ;;
+            prerelease)
+              release_type=prerelease
+              pkgver="${version}.r${RUN_NUMBER}"
+              tag="v${version}-${short_sha}"
+              prerelease=true
+              ;;
+            *)
+              echo "Unsupported Release-Type: ${requested_type}" >&2
+              echo "Use stable or prerelease." >&2
+              exit 1
+              ;;
+          esac
+
+          title="v${version}"
+          {
+            echo "release_type=${release_type}"
+            echo "pkgver=${pkgver}"
+            echo "tag=${tag}"
+            echo "title=${title}"
+            echo "prerelease=${prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Release type: ${release_type}"
+          echo "Release tag: ${tag}"
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -30,13 +88,13 @@ jobs:
       - name: Build installable Arch package
         env:
           COMMIT_SHA: ${{ github.sha }}
-          RUN_NUMBER: ${{ github.run_number }}
+          PKGVER: ${{ steps.release_metadata.outputs.pkgver }}
         run: |
           set -euo pipefail
 
           docker run --rm --interactive \
             --env GITHUB_SHA="${COMMIT_SHA}" \
-            --env GITHUB_RUN_NUMBER="${RUN_NUMBER}" \
+            --env PACKAGE_VERSION="${PKGVER}" \
             --env GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
             --volume "${GITHUB_WORKSPACE}:/workspace" \
             --workdir /workspace \
@@ -52,7 +110,7 @@ jobs:
           set -euo pipefail
 
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
-          pkgver="${version}.r${GITHUB_RUN_NUMBER}"
+          pkgver="${PACKAGE_VERSION}"
           workdir=$(mktemp -d)
           trap 'rm -rf "${workdir}"' EXIT
 
@@ -79,7 +137,7 @@ jobs:
           runuser -u builder -- env \
             HOME=/home/builder \
             GITHUB_SHA="${GITHUB_SHA}" \
-            GITHUB_RUN_NUMBER="${GITHUB_RUN_NUMBER}" \
+            PACKAGE_VERSION="${PACKAGE_VERSION}" \
             GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
             /tmp/build-traur-package.sh
           CONTAINER_SCRIPT
@@ -89,31 +147,41 @@ jobs:
           asset_name=$(basename "${asset}")
           (cd dist && sha256sum "${asset_name}" > "${asset_name}.sha256")
 
-      - name: Create GitHub prerelease
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ steps.release_metadata.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.release_metadata.outputs.title }}
+          PRERELEASE: ${{ steps.release_metadata.outputs.prerelease }}
         run: |
           set -euo pipefail
 
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
           short_sha=${COMMIT_SHA:0:12}
-          tag="v${version}-${short_sha}"
-          title="v${version}"
-          notes=$(git log -1 --format=%B "${COMMIT_SHA}")
+          tag="${RELEASE_TAG}"
+          title="${RELEASE_TITLE}"
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          git log -1 --format=%B "${COMMIT_SHA}" > "${notes_file}"
 
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            echo "Release ${tag} already exists; nothing to do."
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists; nothing to do."
             exit 0
           fi
 
           asset=$(find dist -maxdepth 1 -type f -name '*.pkg.tar.*' -print -quit)
           test -n "${asset}"
 
-          gh release create "${tag}" \
-            "${asset}" \
-            "${asset}.sha256" \
-            --target "${COMMIT_SHA}" \
-            --title "${title}" \
-            --notes "${notes}" \
-            --prerelease
+          release_args=(
+            "${tag}"
+            "${asset}"
+            "${asset}.sha256"
+            --target "${COMMIT_SHA}"
+            --title "${title}"
+            --notes-file "${notes_file}"
+          )
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          gh release create "${release_args[@]}"
