@@ -9,5 +9,6 @@ pub mod models;
 pub mod npm;
 pub mod output;
 pub mod patterns;
+pub mod pkgbuild;
 pub mod scoring;
 pub mod signal_registry;

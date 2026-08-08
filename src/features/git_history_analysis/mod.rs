@@ -50,8 +50,8 @@ impl Feature for GitHistoryAnalysis {
             .map(|m| m.first_submitted)
             .or_else(|| ctx.git_log.last().map(|c| c.timestamp));
 
-        if let Some(created) = creation_time {
-            if now > created {
+        if let Some(created) = creation_time
+            && now > created {
                 let age_days = (now - created) / 86400;
                 if age_days < 7 {
                     signals.push(Signal {
@@ -66,12 +66,11 @@ impl Feature for GitHistoryAnalysis {
                     });
                 }
             }
-        }
 
         // T-MALICIOUS-DIFF: latest commit introduces network-related code
-        if let Some(newest) = ctx.git_log.first() {
-            if let Some(ref diff) = newest.diff {
-                if NET_DIFF_RE.is_match(diff) {
+        if let Some(newest) = ctx.git_log.first()
+            && let Some(ref diff) = newest.diff
+                && NET_DIFF_RE.is_match(diff) {
                     // Check if the prior PKGBUILD already had network code
                     let has_prior_net = ctx
                         .prior_pkgbuild_content
@@ -93,8 +92,6 @@ impl Feature for GitHistoryAnalysis {
                         });
                     }
                 }
-            }
-        }
 
         // T-AUTHOR-CHANGE: different author between commits
         if ctx.git_log.len() >= 2 {

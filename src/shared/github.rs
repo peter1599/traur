@@ -30,11 +30,10 @@ pub fn fetch_github_stars(url: &str) -> Option<GitHubInfo> {
         .header("Accept", "application/vnd.github.v3+json");
 
     // Support GITHUB_TOKEN for higher rate limits
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty() {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-    }
 
     let resp = match request.timeout(std::time::Duration::from_secs(10)).send() {
         Ok(r) => r,

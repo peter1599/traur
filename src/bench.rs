@@ -71,9 +71,17 @@ pub fn run(count: usize, jobs: usize) -> i32 {
 
     let names: Vec<String> = packages.iter().map(|p| p.name.clone()).collect();
 
-    eprintln!("  Batch-fetching package metadata ({} RPC calls)...",
-        (names.len() + RPC_BATCH_SIZE - 1) / RPC_BATCH_SIZE);
-    let metadata = batch_fetch_metadata(&names);
+    eprintln!(
+        "  Batch-fetching package metadata ({} RPC calls)...",
+        names.len().div_ceil(RPC_BATCH_SIZE)
+    );
+    let metadata = match batch_fetch_metadata(&names) {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            eprintln!("Error fetching package metadata: {e}");
+            return 1;
+        }
+    };
     eprintln!("  Got metadata for {} packages", metadata.len());
 
     let maintainer_packages = prefetch_maintainer_packages(&metadata);
@@ -82,7 +90,10 @@ pub fn run(count: usize, jobs: usize) -> i32 {
     eprintln!("  Prefetch done in {:.1}s\n", prefetch_time.as_secs_f64());
 
     // Phase 2: parallel git clone + analysis
-    eprintln!("{}", format!("Phase 2: Scanning {} packages ({} threads)...", total, jobs).bold());
+    eprintln!(
+        "{}",
+        format!("Phase 2: Scanning {} packages ({} threads)...", total, jobs).bold()
+    );
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs)
@@ -127,7 +138,8 @@ pub fn run(count: usize, jobs: usize) -> i32 {
                     Ok(ctx) => {
                         let t1 = Instant::now();
                         let scan = coordinator::run_analysis(&ctx);
-                        analysis_time_us.fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
+                        analysis_time_us
+                            .fetch_add(t1.elapsed().as_micros() as u64, Ordering::Relaxed);
                         Ok(scan)
                     }
                     Err(e) => Err(e),
@@ -180,9 +192,12 @@ pub fn run(count: usize, jobs: usize) -> i32 {
     // Print detailed output for HIGH/CRITICAL/MALICIOUS packages
     let mut flagged = flagged.into_inner().unwrap();
     if !flagged.is_empty() {
-        flagged.sort_by(|a, b| a.score.cmp(&b.score));
+        flagged.sort_by_key(|a| a.score);
         println!();
-        println!("{}", format!("=== {} flagged packages (SKETCHY+) ===", flagged.len()).bold());
+        println!(
+            "{}",
+            format!("=== {} flagged packages (SKETCHY+) ===", flagged.len()).bold()
+        );
         for result in &flagged {
             println!();
             output::print_text(result, false);
@@ -249,21 +264,38 @@ fn print_report(stats: &BenchStats) {
         "    Wall clock:  {:>7.1}s  (scan phase)",
         stats.scan_wall_time.as_secs_f64()
     );
-    println!(
-        "    Total:       {:>7.1}s",
-        stats.total_time.as_secs_f64()
-    );
+    println!("    Total:       {:>7.1}s", stats.total_time.as_secs_f64());
     println!(
         "    Throughput:  {:>7.1} pkg/s",
         stats.scanned as f64 / stats.scan_wall_time.as_secs_f64()
     );
     println!();
     println!("{}", "  Trust distribution:".bold());
-    println!("    TRUSTED:    {:>5}  ({:.1}%)", stats.tier_counts[0], pct(stats.tier_counts[0]));
-    println!("    OK:         {:>5}  ({:.1}%)", stats.tier_counts[1], pct(stats.tier_counts[1]));
-    println!("    SKETCHY:    {:>5}  ({:.1}%)", stats.tier_counts[2], pct(stats.tier_counts[2]));
-    println!("    SUSPICIOUS: {:>5}  ({:.1}%)", stats.tier_counts[3], pct(stats.tier_counts[3]));
-    println!("    MALICIOUS:  {:>5}  ({:.1}%)", stats.tier_counts[4], pct(stats.tier_counts[4]));
+    println!(
+        "    TRUSTED:    {:>5}  ({:.1}%)",
+        stats.tier_counts[0],
+        pct(stats.tier_counts[0])
+    );
+    println!(
+        "    OK:         {:>5}  ({:.1}%)",
+        stats.tier_counts[1],
+        pct(stats.tier_counts[1])
+    );
+    println!(
+        "    SKETCHY:    {:>5}  ({:.1}%)",
+        stats.tier_counts[2],
+        pct(stats.tier_counts[2])
+    );
+    println!(
+        "    SUSPICIOUS: {:>5}  ({:.1}%)",
+        stats.tier_counts[3],
+        pct(stats.tier_counts[3])
+    );
+    println!(
+        "    MALICIOUS:  {:>5}  ({:.1}%)",
+        stats.tier_counts[4],
+        pct(stats.tier_counts[4])
+    );
 
     if !stats.error_samples.is_empty() {
         println!();

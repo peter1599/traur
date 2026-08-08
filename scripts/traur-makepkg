@@ -1,0 +1,105 @@
+#!/bin/sh
+# Scan PKGBUILD before makepkg can source or execute it.
+set -u
+
+real_makepkg=${TRAUR_REAL_MAKEPKG:-/usr/bin/makepkg}
+traur_bin=${TRAUR_BIN:-/usr/bin/traur}
+pkgbuild=""
+build_dir=""
+skip_scan=0
+
+parse_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help|-V|--version)
+                skip_scan=1
+                ;;
+            -D|--dir)
+                shift
+                [ "$#" -gt 0 ] || {
+                    echo "traur-makepkg: missing argument for --dir" >&2
+                    exit 2
+                }
+                build_dir=$1
+                ;;
+            --dir=*)
+                build_dir=${1#*=}
+                ;;
+            -p)
+                shift
+                [ "$#" -gt 0 ] || {
+                    echo "traur-makepkg: missing argument for -p" >&2
+                    exit 2
+                }
+                pkgbuild=$1
+                ;;
+            -p?*)
+                pkgbuild=${1#-p}
+                ;;
+            --)
+                break
+                ;;
+        esac
+        shift
+    done
+}
+
+parse_args "$@"
+
+if [ "$skip_scan" -eq 0 ]; then
+    scan_dir=$PWD
+    if [ -n "$build_dir" ]; then
+        case "$build_dir" in
+            /*) scan_dir=$build_dir ;;
+            *) scan_dir="$PWD/$build_dir" ;;
+        esac
+        if [ ! -d "$scan_dir" ]; then
+            echo "traur-makepkg: build directory not found: $scan_dir" >&2
+            exit 1
+        fi
+    fi
+
+    if [ -z "$pkgbuild" ]; then
+        pkgbuild="$scan_dir/PKGBUILD"
+    elif [ "${pkgbuild#/}" = "$pkgbuild" ]; then
+        pkgbuild="$scan_dir/$pkgbuild"
+    fi
+    if [ ! -f "$pkgbuild" ]; then
+        echo "traur-makepkg: PKGBUILD not found: $pkgbuild" >&2
+        exit 1
+    fi
+
+    if [ ! -x "$traur_bin" ]; then
+        echo "traur-makepkg: scanner not found: $traur_bin" >&2
+        exit 1
+    fi
+
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "traur-makepkg: sha256sum is required for scan cache" >&2
+        exit 1
+    fi
+
+    pkg_hash=$(sha256sum "$pkgbuild" | cut -d ' ' -f1)
+    scanner_hash=$(sha256sum "$traur_bin" | cut -d ' ' -f1)
+    cache_root="${XDG_RUNTIME_DIR:-/tmp}/traur-prebuild-${UID:-$(id -u)}"
+    cache_key=$(printf '%s\0%s\0%s\0' "$pkgbuild" "$pkg_hash" "$scanner_hash" |
+        sha256sum | cut -d ' ' -f1)
+    cache_marker="$cache_root/$cache_key"
+
+    if [ -f "$cache_marker" ]; then
+        :
+    else
+        mkdir -p "$cache_root" && chmod 700 "$cache_root" || {
+            echo "traur-makepkg: cannot create scan cache" >&2
+            exit 1
+        }
+        echo "traur: scanning PKGBUILD before makepkg..." >&2
+        if ! "$traur_bin" scan --pkgbuild "$pkgbuild"; then
+            echo "traur: pre-build scan blocked makepkg" >&2
+            exit 1
+        fi
+        : > "$cache_marker"
+    fi
+fi
+
+exec "$real_makepkg" "$@"

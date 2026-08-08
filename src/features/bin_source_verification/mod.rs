@@ -69,8 +69,8 @@ impl Feature for BinSourceVerification {
                 && normalize_domain(&upstream_domain) == "github.com"
             {
                 let src_org = extract_github_org(raw_url);
-                if let (Some(u_org), Some(s_org)) = (&upstream_org, &src_org) {
-                    if !u_org.eq_ignore_ascii_case(s_org) && !saw_github_org_mismatch {
+                if let (Some(u_org), Some(s_org)) = (&upstream_org, &src_org)
+                    && !u_org.eq_ignore_ascii_case(s_org) && !saw_github_org_mismatch {
                         saw_github_org_mismatch = true;
                         signals.push(Signal {
                             id: "B-BIN-GITHUB-ORG-MISMATCH".to_string(),
@@ -85,7 +85,6 @@ impl Feature for BinSourceVerification {
                             matched_line: Some(raw_url.clone()),
                         });
                     }
-                }
                 continue; // Already compared at org level, skip domain check
             }
 

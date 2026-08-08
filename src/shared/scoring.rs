@@ -128,7 +128,7 @@ pub fn compute_score(package_name: &str, signals: &[Signal], input: &ScoreInput)
 
     if let Some(signal) = best_override {
         let weighted_risk = compute_weighted_risk(signals);
-        let risk = (signal.points as u32).max(weighted_risk).min(100);
+        let risk = signal.points.max(weighted_risk).min(100);
         return ScanResult {
             package: package_name.to_string(),
             score: 100 - risk,
@@ -453,7 +453,7 @@ pub fn evaluate_comment_threat(
                 continue; // skip — this comment is reassuring, not warning
             }
             // Track the latest danger comment
-            if latest_danger.map_or(true, |(ts, _)| entry.timestamp > ts) {
+            if latest_danger.is_none_or(|(ts, _)| entry.timestamp > ts) {
                 latest_danger = Some((entry.timestamp, &entry.text));
             }
         }

@@ -621,7 +621,7 @@ is_critical = true
 
 [[pkgbuild_analysis]]
 id = "P-NPM-SUSPICIOUS-SCRIPT"
-pattern = '(npm|yarn|npx)\s+(run\s+)?(postinstall|preinstall|install)'
+pattern = '(npm|yarn|pnpm|npx)\s+(run\s+)?(postinstall|preinstall|install)'
 points = 50
 description = "Running npm lifecycle scripts – possible payload vector"
 override_gate = false
@@ -1766,4 +1766,3 @@ pattern = 'tailscale\s+file\s+cp\s'
 points = 55
 description = "Tailscale file copy (VPN-based data exfiltration)"
 override_gate = false
-

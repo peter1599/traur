@@ -1,7 +1,7 @@
 use crate::features;
 use crate::shared::models::{MaintainerInfo, PackageContext};
-use crate::shared::{npm, output};
 use crate::shared::scoring::{self, ScanResult, Tier};
+use crate::shared::{npm, output};
 
 /// Scan a package by name, printing results. Returns the computed tier.
 pub fn scan_package(package_name: &str, json: bool, verbose: bool) -> Result<Tier, String> {
@@ -17,25 +17,69 @@ pub fn scan_package(package_name: &str, json: bool, verbose: bool) -> Result<Tie
     Ok(result.tier)
 }
 
+fn resolve_package_info(
+    package_name: &str,
+    cache_str: &str,
+) -> Result<
+    (
+        crate::shared::models::AurPackage,
+        Option<std::path::PathBuf>,
+        Option<String>,
+    ),
+    String,
+> {
+    use crate::shared::{aur_git, aur_rpc, pkgbuild};
+
+    if let Some(metadata) = aur_rpc::find_package_info(package_name)? {
+        return Ok((metadata, None, None));
+    }
+
+    // AUR RPC info accepts package names, not package-base-only identifiers.
+    // Clone by package base, then try literal PKGBUILD names in declared priority.
+    let repo_path = aur_git::ensure_repo(package_name, cache_str)?;
+    let content = aur_git::read_pkgbuild(&repo_path)?;
+    let candidates = pkgbuild::package_name_candidates(&content);
+    let mut tried = Vec::new();
+
+    for candidate in candidates {
+        if candidate == package_name {
+            continue;
+        }
+        tried.push(candidate.clone());
+        if let Some(metadata) = aur_rpc::find_package_info(&candidate)? {
+            return Ok((metadata, Some(repo_path), Some(content)));
+        }
+    }
+
+    let suffix = if tried.is_empty() {
+        "no literal pkgname fallback found in PKGBUILD".to_string()
+    } else {
+        format!("tried PKGBUILD names: {}", tried.join(", "))
+    };
+    Err(format!(
+        "Package '{package_name}' not found on AUR ({suffix})"
+    ))
+}
+
 /// Build a PackageContext by fetching all data needed for analysis.
 pub fn build_context(package_name: &str) -> Result<PackageContext, String> {
     use crate::shared::{aur_comments, aur_git, aur_rpc, cache, github};
 
-    let metadata = aur_rpc::fetch_package_info(package_name)?;
-
-    // Determine package base (for split packages)
-    let package_base = metadata
-        .package_base
-        .as_deref()
-        .unwrap_or(package_name);
-
-    // Clone/pull the AUR git repo
     let git_cache = cache::git_cache_dir();
     let cache_str = git_cache.to_str().unwrap_or("/tmp/traur-git");
+    let (metadata, prefetched_repo, prefetched_pkgbuild) =
+        resolve_package_info(package_name, cache_str)?;
 
-    let repo_path = aur_git::ensure_repo(package_base, cache_str)?;
+    // Determine package base (for split packages)
+    let package_base = metadata.package_base.as_deref().unwrap_or(package_name);
 
-    let pkgbuild_content = aur_git::read_pkgbuild(&repo_path).ok();
+    // Clone/pull the AUR git repo
+    let repo_path = match prefetched_repo {
+        Some(path) => path,
+        None => aur_git::ensure_repo(package_base, cache_str)?,
+    };
+
+    let pkgbuild_content = prefetched_pkgbuild.or_else(|| aur_git::read_pkgbuild(&repo_path).ok());
     let install_script_content = pkgbuild_content
         .as_deref()
         .and_then(|content| aur_git::read_install_script(&repo_path, content));
@@ -64,8 +108,13 @@ pub fn build_context(package_name: &str) -> Result<PackageContext, String> {
     let (github_stars, github_not_found) = metadata
         .url
         .as_deref()
-        .and_then(|url| github::fetch_github_stars(url))
-        .map(|info| (if info.found { Some(info.stars) } else { None }, !info.found))
+        .and_then(github::fetch_github_stars)
+        .map(|info| {
+            (
+                if info.found { Some(info.stars) } else { None },
+                !info.found,
+            )
+        })
         .unwrap_or((None, false));
 
     // Fetch recent AUR comments
@@ -78,9 +127,7 @@ pub fn build_context(package_name: &str) -> Result<PackageContext, String> {
         prior_pkgbuild_content.as_deref(),
     );
 
-    let npm_info = pkgbuild_content
-        .as_deref()
-        .and_then(|content| npm::fetch_npm_info(content));
+    let npm_info = pkgbuild_content.as_deref().and_then(npm::fetch_npm_info);
 
     Ok(PackageContext {
         name: package_name.to_string(),
@@ -109,10 +156,7 @@ pub fn build_context_prefetched(
 ) -> Result<PackageContext, String> {
     use crate::shared::{aur_comments, aur_git, cache, github};
 
-    let package_base = metadata
-        .package_base
-        .as_deref()
-        .unwrap_or(package_name);
+    let package_base = metadata.package_base.as_deref().unwrap_or(package_name);
 
     let git_cache = cache::git_cache_dir();
     let cache_str = git_cache.to_str().unwrap_or("/tmp/traur-git");
@@ -138,22 +182,21 @@ pub fn build_context_prefetched(
     let (gh_stars, gh_not_found) = metadata
         .url
         .as_deref()
-        .and_then(|url| github::fetch_github_stars(url))
-        .map(|info| (if info.found { Some(info.stars) } else { None }, !info.found))
+        .and_then(github::fetch_github_stars)
+        .map(|info| {
+            (
+                if info.found { Some(info.stars) } else { None },
+                !info.found,
+            )
+        })
         .unwrap_or((None, false));
 
     let comments = aur_comments::fetch_recent_comments(package_base);
 
-    let (maint_info, has_orphan, has_mal_diff) = compute_context_meta(
-        &metadata,
-        &maintainer_packages,
-        &log,
-        prior.as_deref(),
-    );
+    let (maint_info, has_orphan, has_mal_diff) =
+        compute_context_meta(&metadata, &maintainer_packages, &log, prior.as_deref());
 
-    let npm_info = pkgbuild
-        .as_deref()
-        .and_then(|content| npm::fetch_npm_info(content));
+    let npm_info = pkgbuild.as_deref().and_then(npm::fetch_npm_info);
 
     Ok(PackageContext {
         name: package_name.to_string(),
@@ -225,7 +268,9 @@ pub fn run_analysis_with_config(
         .unwrap_or((0, 0.0));
 
     // ── NPM dynamic penalty: if PKGBUILD uses npm install/npx, check legitimacy ──
-    let has_npm_suspicious = all_signals.iter().any(|s| s.id == "P-NPM-SUSPICIOUS-SCRIPT");
+    let has_npm_suspicious = all_signals
+        .iter()
+        .any(|s| s.id == "P-NPM-SUSPICIOUS-SCRIPT");
     if has_npm_suspicious {
         if let Some(ref npm) = ctx.npm_info {
             let npm_risk = scoring::npm_suspicion_risk(npm);
@@ -258,9 +303,15 @@ pub fn run_analysis_with_config(
 
             // Emit N-NPM-LEGITIMACY-CHECKED signal to show the fork did its job
             let npm_desc = if npm_risk >= 25 {
-                format!("NPM legitimacy check: SUSPICIOUS (npm suspicion risk {})", npm_risk)
+                format!(
+                    "NPM legitimacy check: SUSPICIOUS (npm suspicion risk {})",
+                    npm_risk
+                )
             } else {
-                format!("NPM legitimacy check: legitimate (npm suspicion risk {})", npm_risk)
+                format!(
+                    "NPM legitimacy check: legitimate (npm suspicion risk {})",
+                    npm_risk
+                )
             };
             all_signals.push(scoring::Signal {
                 id: "N-NPM-LEGITIMACY-CHECKED".to_string(),
@@ -280,7 +331,9 @@ pub fn run_analysis_with_config(
         if has_submitter_changed {
             // Check if npm/yarn/npx was already in the prior PKGBUILD
             let npm_was_always_there = ctx.prior_pkgbuild_content.as_deref().is_some_and(|prior| {
-                let re = regex::Regex::new(r"(?i)(npm\s+(install|run)|npx\s+|yarn\s+(install|add))").unwrap();
+                let re =
+                    regex::Regex::new(r"(?i)(npm\s+(install|run)|npx\s+|yarn\s+(install|add))")
+                        .unwrap();
                 re.is_match(prior)
             });
 
@@ -297,8 +350,7 @@ pub fn run_analysis_with_config(
     }
 
     // Apply time-aware comment threat evaluation
-    let comment_verdict =
-        scoring::evaluate_comment_threat(&ctx.aur_comments, votes, popularity);
+    let comment_verdict = scoring::evaluate_comment_threat(&ctx.aur_comments, votes, popularity);
     let has_malware_warning = match comment_verdict {
         scoring::CommentSecurityVerdict::OverrideFire => true,
         scoring::CommentSecurityVerdict::Degraded { points } => {
@@ -361,10 +413,8 @@ fn compute_context_meta(
         // Days since takeover: if submitter changed, use time since latest git commit with new author
         let days_since_takeover = if !is_original && git_log.len() >= 2 {
             let latest_author = git_log[0].author.as_str();
-            let prior_authors: std::collections::HashSet<&str> = git_log[1..]
-                .iter()
-                .map(|c| c.author.as_str())
-                .collect();
+            let prior_authors: std::collections::HashSet<&str> =
+                git_log[1..].iter().map(|c| c.author.as_str()).collect();
             if !prior_authors.contains(latest_author) {
                 let takeover_ts = git_log[0].timestamp;
                 Some(((now.saturating_sub(takeover_ts)) / 86400) as u32)
@@ -394,10 +444,8 @@ fn compute_context_meta(
         let established = now.saturating_sub(metadata.first_submitted) > 90 * 86400;
         let author_changed = git_log.len() >= 2 && {
             let latest_author = git_log[0].author.as_str();
-            let prior_authors: std::collections::HashSet<&str> = git_log[1..]
-                .iter()
-                .map(|c| c.author.as_str())
-                .collect();
+            let prior_authors: std::collections::HashSet<&str> =
+                git_log[1..].iter().map(|c| c.author.as_str()).collect();
             !prior_authors.contains(latest_author)
         };
         submitter_changed && established && author_changed
@@ -406,8 +454,9 @@ fn compute_context_meta(
     // Check new malicious diff: any newly-added line matching a high-severity pattern (>=60pts)
     // or network code pattern from pkgbuild_analysis that wasn't in the prior PKGBUILD.
     let has_new_malicious_diff = {
-        static HIGH_SEV_PATTERNS: std::sync::LazyLock<Vec<crate::shared::patterns::CompiledPattern>> =
-            std::sync::LazyLock::new(|| crate::shared::patterns::load_high_severity_diff_patterns());
+        static HIGH_SEV_PATTERNS: std::sync::LazyLock<
+            Vec<crate::shared::patterns::CompiledPattern>,
+        > = std::sync::LazyLock::new(crate::shared::patterns::load_high_severity_diff_patterns);
 
         if let Some(newest) = git_log.first() {
             if let Some(ref diff) = newest.diff {
@@ -417,25 +466,27 @@ fn compute_context_meta(
                         .lines()
                         .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
                         .any(|l| pat.regex.is_match(&l[1..])); // strip the + prefix
-                    // Check if the pattern was already in the prior PKGBUILD
-                    let in_prior = prior_pkgbuild_content
-                        .is_some_and(|content| pat.regex.is_match(content));
+                                                               // Check if the pattern was already in the prior PKGBUILD
+                    let in_prior =
+                        prior_pkgbuild_content.is_some_and(|content| pat.regex.is_match(content));
                     in_diff && !in_prior
                 });
 
                 // Also keep the original network code check for T-MALICIOUS-DIFF compatibility
                 let has_net_diff = {
                     let net_diff_re = regex::Regex::new(
-                        r"\+.*(curl|wget|nc\s|ncat|socat|/dev/tcp|python.*socket|ruby.*socket)"
-                    ).ok();
+                        r"\+.*(curl|wget|nc\s|ncat|socat|/dev/tcp|python.*socket|ruby.*socket)",
+                    )
+                    .ok();
                     let net_content_re = regex::Regex::new(
-                        r"(curl|wget|nc\s|ncat|socat|/dev/tcp|python.*socket|ruby.*socket)"
-                    ).ok();
+                        r"(curl|wget|nc\s|ncat|socat|/dev/tcp|python.*socket|ruby.*socket)",
+                    )
+                    .ok();
 
                     if let (Some(nd_re), Some(nc_re)) = (net_diff_re, net_content_re) {
                         let has_net = nd_re.is_match(diff);
-                        let has_prior_net = prior_pkgbuild_content
-                            .is_some_and(|content| nc_re.is_match(content));
+                        let has_prior_net =
+                            prior_pkgbuild_content.is_some_and(|content| nc_re.is_match(content));
                         has_net && !has_prior_net
                     } else {
                         false
@@ -487,7 +538,11 @@ mod tests {
         let ts = now_ts();
         GitCommit {
             author: author.into(),
-            timestamp: if diff.is_some() { ts - 3600 } else { ts - 90 * 86400 },
+            timestamp: if diff.is_some() {
+                ts - 3600
+            } else {
+                ts - 90 * 86400
+            },
             diff: diff.map(|s| s.to_string()),
         }
     }
@@ -505,8 +560,8 @@ mod tests {
             num_votes: 0,
             popularity: 0.0,
             out_of_date: None,
-            maintainer: Some("meryemplath".into()),  // attacker's email
-            submitter: Some("richc".into()),         // original submitter
+            maintainer: Some("meryemplath".into()), // attacker's email
+            submitter: Some("richc".into()),        // original submitter
             first_submitted: ts - 365 * 86400,      // 1 year old — established
             last_modified: ts - 3600,
             license: None,
@@ -553,12 +608,8 @@ index 0000000..fff7451
             make_commit("richc", None),
         ];
 
-        let (maint_info, has_orphan, has_mal_diff) = compute_context_meta(
-            &metadata,
-            &[],
-            &git_log,
-            Some(prior_pkgbuild),
-        );
+        let (maint_info, has_orphan, has_mal_diff) =
+            compute_context_meta(&metadata, &[], &git_log, Some(prior_pkgbuild));
 
         assert!(
             has_mal_diff,
@@ -583,7 +634,7 @@ index 0000000..fff7451
             has_orphan_takeover: has_orphan,
             has_new_malicious_diff: has_mal_diff,
             npm_info: None,
-            has_community_malware_warning: false,  // deliberately bypass comments
+            has_community_malware_warning: false, // deliberately bypass comments
         };
 
         let result = scoring::compute_score("anythingllm-cli-bin", &signals, &score_input);
@@ -596,7 +647,8 @@ index 0000000..fff7451
         );
         assert!(
             result.score <= 5,
-            "Expected trust <= 5, got {}", result.score
+            "Expected trust <= 5, got {}",
+            result.score
         );
     }
 
@@ -616,17 +668,9 @@ depends=('glibc')
 +pkgver=1.1
 "#;
 
-        let git_log = vec![
-            make_commit("orig", Some(diff)),
-            make_commit("orig", None),
-        ];
+        let git_log = vec![make_commit("orig", Some(diff)), make_commit("orig", None)];
 
-        let (_, _, has_mal_diff) = compute_context_meta(
-            &metadata,
-            &[],
-            &git_log,
-            Some(prior),
-        );
+        let (_, _, has_mal_diff) = compute_context_meta(&metadata, &[], &git_log, Some(prior));
 
         assert!(
             !has_mal_diff,

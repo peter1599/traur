@@ -134,8 +134,8 @@ pub fn fetch_npm_info(pkgbuild_content: &str) -> Option<NpmPackageInfo> {
     };
 
     // If npm package has a GitHub repo, fetch deep-inspection stats
-    if let Some(ref repo_url) = repo_url {
-        if let Some((owner, repo)) = parse_github_url(repo_url) {
+    if let Some(ref repo_url) = repo_url
+        && let Some((owner, repo)) = parse_github_url(repo_url) {
             let clean_repo = repo.trim_end_matches(".git");
 
             // Fetch repo overview (stars, forks, last push)
@@ -169,7 +169,6 @@ pub fn fetch_npm_info(pkgbuild_content: &str) -> Option<NpmPackageInfo> {
                 info.repo_spoofed = true;
             }
         }
-    }
 
     Some(info)
 }
@@ -193,14 +192,13 @@ fn extract_npm_package_name(content: &str) -> Option<String> {
     if let Some(caps) = NPM_INSTALL_RE.captures(content) {
         let pkg = caps[4].to_string();
         // Strip version: @scope/name@version -> @scope/name
-        if let Some(at_pos) = pkg.rfind('@') {
-            if at_pos > 0 {
+        if let Some(at_pos) = pkg.rfind('@')
+            && at_pos > 0 {
                 let name = &pkg[..at_pos];
                 if !name.is_empty() {
                     return Some(name.to_string());
                 }
             }
-        }
         if !pkg.is_empty() {
             return Some(pkg);
         }
@@ -275,11 +273,10 @@ fn fetch_github_stats(owner: &str, repo: &str) -> Option<GitHubNpmStats> {
         .header("User-Agent", "traur")
         .header("Accept", "application/vnd.github.v3+json");
 
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty() {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-    }
 
     let resp = request
         .timeout(std::time::Duration::from_secs(10))
@@ -349,11 +346,10 @@ fn fetch_github_closed_issues(owner: &str, repo: &str) -> Option<u32> {
         .header("User-Agent", "traur")
         .header("Accept", "application/vnd.github.v3+json");
 
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty() {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-    }
 
     let resp = request
         .timeout(std::time::Duration::from_secs(10))
@@ -390,11 +386,10 @@ fn fetch_github_readme_size(owner: &str, repo: &str) -> Option<u32> {
         .header("User-Agent", "traur")
         .header("Accept", "application/vnd.github.v3+json");
 
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty() {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-    }
 
     let resp = request
         .timeout(std::time::Duration::from_secs(10))
@@ -434,11 +429,10 @@ fn fetch_github_package_json_name(owner: &str, repo: &str) -> Option<String> {
         .header("User-Agent", "traur")
         .header("Accept", "application/vnd.github.v3+json");
 
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        if !token.is_empty() {
+    if let Ok(token) = std::env::var("GITHUB_TOKEN")
+        && !token.is_empty() {
             request = request.header("Authorization", format!("Bearer {token}"));
         }
-    }
 
     let resp = request
         .timeout(std::time::Duration::from_secs(10))
@@ -506,8 +500,8 @@ fn npm_name_matches_repo_name(npm_name: &str, repo_name: &str) -> bool {
     }
 
     // npm unscoped, repo scoped: check scope part and unscope remainder
-    if !n.starts_with('@') && r.starts_with('@') {
-        if let Some(slash) = r.find('/') {
+    if !n.starts_with('@') && r.starts_with('@')
+        && let Some(slash) = r.find('/') {
             let scope = &r[1..slash];
             if n == scope {
                 return true;
@@ -522,11 +516,10 @@ fn npm_name_matches_repo_name(npm_name: &str, repo_name: &str) -> bool {
                 return true;
             }
         }
-    }
 
     // Both scoped: compare unscope parts
-    if n.starts_with('@') && r.starts_with('@') {
-        if let (Some(nu), Some(ru)) = (n.split('/').nth(1), r.split('/').nth(1)) {
+    if n.starts_with('@') && r.starts_with('@')
+        && let (Some(nu), Some(ru)) = (n.split('/').nth(1), r.split('/').nth(1)) {
             if nu == ru {
                 return true;
             }
@@ -534,7 +527,6 @@ fn npm_name_matches_repo_name(npm_name: &str, repo_name: &str) -> bool {
                 return true;
             }
         }
-    }
 
     // Substring fallback
     if (n.len() >= 5 && r.contains(&n)) || (r.len() >= 5 && n.contains(&r)) {
@@ -577,12 +569,12 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
             return None;
         }
         out.push((a << 2) | (b >> 4));
-        if chunk.get(2).map_or(false, |&ch| ch != b'=') {
+        if chunk.get(2).is_some_and(|&ch| ch != b'=') {
             if c == 255 {
                 return None;
             }
             out.push((b << 4) | (c >> 2));
-            if chunk.get(3).map_or(false, |&ch| ch != b'=') {
+            if chunk.get(3).is_some_and(|&ch| ch != b'=') {
                 if d == 255 {
                     return None;
                 }
@@ -639,7 +631,7 @@ fn chrono_like_parse(s: &str) -> Result<i64, ()> {
 
 /// Days from Unix epoch for a civil date.
 fn days_from_civil(y: i32, m: u32, d: u32) -> i32 {
-    let y = y as i32;
+    let y = y;
     let m = m as i32;
     let d = d as i32;
     let y = if m <= 2 { y - 1 } else { y };

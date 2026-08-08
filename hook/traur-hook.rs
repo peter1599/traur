@@ -6,11 +6,11 @@
 //! All output goes to /dev/tty — pacman buffers both stdout and stderr from
 //! hooks, so we must write directly to the terminal.
 
+use colored::Colorize;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Write};
-use std::collections::HashSet;
 use std::process::Command;
-use colored::Colorize;
 use traur::coordinator;
 use traur::shared::bulk;
 use traur::shared::config::{self, is_whitelisted_in};
@@ -86,7 +86,18 @@ fn main() {
         .collect();
 
     // Batch-fetch AUR metadata to separate real AUR packages from local-only ones
-    let metadata = bulk::batch_fetch_metadata(&to_scan);
+    let metadata = match bulk::batch_fetch_metadata(&to_scan) {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            let _ = writeln!(tty, "  Failed to fetch AUR metadata: {e}");
+            let _ = writeln!(
+                tty,
+                "traur: hook network unavailable; installed traur.hook must contain NetworkAccess = allowed"
+            );
+            let _ = writeln!(tty, "traur: cannot scan packages — blocking transaction");
+            std::process::exit(1);
+        }
+    };
     let not_found: Vec<&str> = to_scan
         .iter()
         .filter(|n| !metadata.contains_key(n.as_str()))
@@ -117,7 +128,13 @@ fn main() {
 
     for (i, pkg) in scan_packages.iter().enumerate() {
         // Progress indicator (single line, overwritten each iteration)
-        let _ = write!(tty, "\r  Scanning {} ({}/{})...          ", pkg, i + 1, total_scan);
+        let _ = write!(
+            tty,
+            "\r  Scanning {} ({}/{})...          ",
+            pkg,
+            i + 1,
+            total_scan
+        );
         let _ = tty.flush();
 
         let meta = metadata.get(pkg.as_str()).cloned().unwrap();
@@ -138,7 +155,9 @@ fn main() {
                     Tier::Suspicious => 3,
                     Tier::Malicious => 4,
                 };
-                tier_counts[idx] += 1;
+                *tier_counts
+                    .get_mut(idx)
+                    .expect("tier index must be in range") += 1;
                 results.push(result);
             }
             Err(e) => {
@@ -170,11 +189,14 @@ fn main() {
     let _ = writeln!(tty, "  Scanned: {} package(s)", scanned);
 
     let tier_labels = [
-        ("TRUSTED", tier_counts[0]),
-        ("OK", tier_counts[1]),
-        ("SKETCHY", tier_counts[2]),
-        ("SUSPICIOUS", tier_counts[3]),
-        ("MALICIOUS", tier_counts[4]),
+        ("TRUSTED", tier_counts.first().copied().unwrap_or_default()),
+        ("OK", tier_counts.get(1).copied().unwrap_or_default()),
+        ("SKETCHY", tier_counts.get(2).copied().unwrap_or_default()),
+        (
+            "SUSPICIOUS",
+            tier_counts.get(3).copied().unwrap_or_default(),
+        ),
+        ("MALICIOUS", tier_counts.get(4).copied().unwrap_or_default()),
     ];
     let tier_parts: Vec<String> = tier_labels
         .iter()
@@ -195,10 +217,16 @@ fn main() {
         let _ = writeln!(tty, "  {}", tier_parts.join("  "));
     }
 
-    // Full detail for all results
+    // Full detail only for flagged results; clean packages are covered by the summary.
     if !results.is_empty() {
-        results.sort_by(|a, b| a.score.cmp(&b.score));
+        results.sort_by_key(|a| a.score);
         for result in &results {
+            if !matches!(
+                result.tier,
+                Tier::Sketchy | Tier::Suspicious | Tier::Malicious
+            ) {
+                continue;
+            }
             let _ = writeln!(tty);
             output::write_text(&mut tty, result, false);
         }
@@ -212,8 +240,9 @@ fn main() {
         }
     }
 
-    let has_malicious = tier_counts[4] > 0;
-    let has_flagged = tier_counts[2] > 0 || tier_counts[3] > 0; // SKETCHY or SUSPICIOUS
+    let has_malicious = tier_counts.get(4).copied().unwrap_or_default() > 0;
+    let has_flagged = tier_counts.get(2).copied().unwrap_or_default() > 0
+        || tier_counts.get(3).copied().unwrap_or_default() > 0; // SKETCHY or SUSPICIOUS
 
     // Case 2: MALICIOUS detected -> hard block, must whitelist
     if has_malicious {
@@ -221,7 +250,9 @@ fn main() {
         let _ = writeln!(
             tty,
             "{}",
-            "traur: MALICIOUS package(s) detected — blocking transaction".red().bold()
+            "traur: MALICIOUS package(s) detected — blocking transaction"
+                .red()
+                .bold()
         );
         let _ = writeln!(
             tty,
@@ -236,7 +267,9 @@ fn main() {
         let _ = writeln!(
             tty,
             "{}",
-            "traur: scan errors occurred — blocking transaction".red().bold()
+            "traur: scan errors occurred — blocking transaction"
+                .red()
+                .bold()
         );
         let _ = writeln!(
             tty,
@@ -248,7 +281,11 @@ fn main() {
     // Case 4: SKETCHY or SUSPICIOUS -> prompt [y/N]
     if has_flagged {
         let _ = writeln!(tty);
-        let _ = write!(tty, "{} ", "traur: Continue with installation? [y/N]".bold());
+        let _ = write!(
+            tty,
+            "{} ",
+            "traur: Continue with installation? [y/N]".bold()
+        );
         let _ = tty.flush();
 
         let mut reader = BufReader::new(tty);
@@ -268,8 +305,8 @@ fn main() {
         return;
     }
 
-    // Case 5: All clean -> no prompt
-    let _ = writeln!(tty, "\n  {}", "All packages look clean.".green());
+    // Case 5: No package reached a flagged tier -> no prompt
+    let _ = writeln!(tty, "\n  {}", "No packages were flagged.".green());
 }
 
 /// Get all package names from official sync databases in one call.

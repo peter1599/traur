@@ -10,24 +10,23 @@ pub const MAX_RETRIES: u32 = 3;
 pub const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// Fetch AUR metadata for a batch of package names via the RPC API.
-pub fn batch_fetch_metadata(names: &[String]) -> HashMap<String, AurPackage> {
+pub fn batch_fetch_metadata(names: &[String]) -> Result<HashMap<String, AurPackage>, String> {
     let mut map = HashMap::new();
 
     for chunk in names.chunks(RPC_BATCH_SIZE) {
         let refs: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
-        match aur_rpc::fetch_packages_info(&refs) {
-            Ok(packages) => {
-                for pkg in packages {
-                    map.insert(pkg.name.clone(), pkg);
-                }
-            }
-            Err(e) => {
-                eprintln!("  Warning: batch metadata fetch failed: {e}");
-            }
+        let packages = aur_rpc::fetch_packages_info(&refs).map_err(|e| {
+            format!(
+                "batch metadata fetch failed for {} package(s): {e}",
+                chunk.len()
+            )
+        })?;
+        for pkg in packages {
+            map.insert(pkg.name.clone(), pkg);
         }
     }
 
-    map
+    Ok(map)
 }
 
 /// Pre-fetch all maintainer package lists in parallel.
@@ -63,8 +62,11 @@ pub fn clone_with_retry(
     maintainer_packages: Vec<AurPackage>,
 ) -> Result<PackageContext, String> {
     for attempt in 0..MAX_RETRIES {
-        match coordinator::build_context_prefetched(name, metadata.clone(), maintainer_packages.clone())
-        {
+        match coordinator::build_context_prefetched(
+            name,
+            metadata.clone(),
+            maintainer_packages.clone(),
+        ) {
             Ok(ctx) => return Ok(ctx),
             Err(_e) if attempt + 1 < MAX_RETRIES => {
                 let delay = RETRY_BASE_DELAY * 2u32.pow(attempt);

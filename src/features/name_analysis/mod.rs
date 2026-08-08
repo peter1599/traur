@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use strsim::levenshtein;
 
 /// Suspicious suffixes that indicate impersonation attempts.
-const IMPERSONATION_SUFFIXES: &[&str] = &[
+const IMPERSONATION_SUFFIXES: &[&str; 16] = &[
     "-fix",
     "-fixed",
     "-patch",
@@ -25,7 +25,7 @@ const IMPERSONATION_SUFFIXES: &[&str] = &[
 ];
 
 /// Popular brand names commonly targeted for impersonation.
-const BRAND_NAMES: &[&str] = &[
+const BRAND_NAMES: &[&str; 28] = &[
     "firefox",
     "chromium",
     "chrome",
@@ -102,15 +102,23 @@ static TOP_PACKAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
     .collect()
 });
 
+/// Normalize conventional package wrappers for containment checks only.
+///
+/// Keep other name heuristics on the raw package name so suspicious variants
+/// such as `firefox-fix-bin` still reach impersonation analysis.
+fn canonical_variant_name(name: &str) -> &str {
+    let name = name.strip_prefix("python-").unwrap_or(name);
+    name.strip_suffix("-bin").unwrap_or(name)
+}
+
 pub struct NameAnalysis;
 
 impl Feature for NameAnalysis {
     fn analyze(&self, ctx: &PackageContext) -> Vec<Signal> {
-        if let Some(ref meta) = ctx.metadata {
-            if meta.num_votes >= 10 {
+        if let Some(ref meta) = ctx.metadata
+            && meta.num_votes >= 10 {
                 return Vec::new();
             }
-        }
 
         let mut signals = Vec::new();
         let name = &ctx.name;
@@ -169,6 +177,14 @@ impl Feature for NameAnalysis {
             if name == top.as_str() || name.len() <= top.len() {
                 continue;
             }
+
+            // `python-foo` and `foo-bin` are conventional package variants,
+            // not typosquats, when their canonical base exactly matches a
+            // popular package. Keep raw-name checks above unchanged.
+            if canonical_variant_name(name) == canonical_variant_name(top) {
+                continue;
+            }
+
             let is_prefix = name.starts_with(top.as_str());
             let is_suffix = name.ends_with(top.as_str());
             if is_prefix || is_suffix {
@@ -270,8 +286,23 @@ mod tests {
     fn typosquat_containment() {
         assert!(has(&analyze("yay2"), "B-TYPOSQUAT")); // prefix
         assert!(has(&analyze("2vim"), "B-TYPOSQUAT")); // suffix
-        assert!(has(&analyze("yay-bin"), "B-TYPOSQUAT")); // prefix with hyphen
+        assert!(!has(&analyze("yay-bin"), "B-TYPOSQUAT"));
         assert!(!has(&analyze("myay-bin"), "B-TYPOSQUAT"), "No prefix/suffix match");
+    }
+
+    #[test]
+    fn conventional_package_variants_no_containment_typosquat() {
+        for name in [
+            "python-steam",
+            "proton-ge-custom-bin",
+            "firefox-bin",
+            "python-visual-studio-code-bin",
+        ] {
+            assert!(
+                !has(&analyze_with_votes(name, 0), "B-TYPOSQUAT"),
+                "conventional variant should not trigger containment typosquat: {name}"
+            );
+        }
     }
 
     #[test]

@@ -8,24 +8,19 @@ static HAS_CHECKSUMS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(md5|sha1|sha224|sha256|sha384|sha512|b2)sums(_[a-zA-Z0-9_]+)?\s*=").unwrap()
 });
 
-static WEAK_CHECKSUMS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^(md5|sha1)sums=").unwrap()
-});
+static WEAK_CHECKSUMS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^(md5|sha1)sums(?:_[a-zA-Z0-9_]+)?\s*=").unwrap());
 
-static STRONG_CHECKSUMS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^(sha(256|384|512)|b2)sums=").unwrap()
-});
+static STRONG_CHECKSUMS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^(sha(256|384|512)|b2)sums(?:_[a-zA-Z0-9_]+)?\s*=").unwrap());
 
 static CHECKSUM_ARRAY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?ms)^(md5|sha\d+|b2)sums=\((.*?)\)").unwrap()
-});
-
-static ENTRY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'([^']*)'").unwrap()
+    Regex::new(r"(?ms)^(md5|sha\d+|b2)sums(?:_[a-zA-Z0-9_]+)?\s*=\s*\((.*?)\)").unwrap()
 });
 
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"['"][^'"]*['"]|[^\s'")()]+"#).unwrap()
+    Regex::new(r#"(?:'[^']*'|"[^"]*")(?:\s*::\s*(?:'[^']*'|"[^"]*"|[^\s'")()]+))*|[^\s'")()]+"#)
+        .unwrap()
 });
 
 pub struct ChecksumAnalysis;
@@ -90,7 +85,15 @@ impl Feature for ChecksumAnalysis {
             let source_name = format!("source{suffix}");
             let src_count = count_array_entries(content, &source_name);
             if src_count > 0 {
-                for algo in &["md5sums", "sha256sums", "sha512sums", "b2sums"] {
+                for algo in &[
+                    "md5sums",
+                    "sha1sums",
+                    "sha224sums",
+                    "sha256sums",
+                    "sha384sums",
+                    "sha512sums",
+                    "b2sums",
+                ] {
                     let checksum_name = format!("{algo}{suffix}");
                     let cksum_count = count_array_entries(content, &checksum_name);
                     if cksum_count > 0 && cksum_count != src_count {
@@ -99,7 +102,7 @@ impl Feature for ChecksumAnalysis {
                             category: SignalCategory::Pkgbuild,
                             points: 25,
                             description: format!(
-                                "checksum count mismatch: {source_name} has {src_count} entries but {checksum_name} has {cksum_count}"
+                                "Checksum coverage needs review: {source_name} has {src_count} entries but {checksum_name} has {cksum_count}"
                             ),
                             is_override_gate: false,
                             is_critical: false,
@@ -122,9 +125,13 @@ fn has_all_skip_checksums(content: &str) -> bool {
 
     for caps in CHECKSUM_ARRAY_RE.captures_iter(content) {
         let body = &caps[2];
-        let entries: Vec<&str> = ENTRY_RE
-            .captures_iter(body)
-            .map(|c| c.get(1).unwrap().as_str())
+        if DYNAMIC_BASH_RE.is_match(body) {
+            continue;
+        }
+
+        let entries: Vec<&str> = TOKEN_RE
+            .find_iter(body)
+            .map(|m| m.as_str().trim_matches(|c| c == '\'' || c == '"'))
             .collect();
 
         if entries.is_empty() {
@@ -150,15 +157,14 @@ fn find_array_suffixes(content: &str) -> Vec<String> {
         .collect()
 }
 
-static DYNAMIC_BASH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$\(|`|\$\{[^}]*\[@\]|\$\{[^}]*\[\*\]").unwrap()
-});
+static DYNAMIC_BASH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\(|`|\$\{[^}]*\[@\]|\$\{[^}]*\[\*\]").unwrap());
 
 /// Count entries in a bash array like source=(...) or sha256sums=(...)
 /// Returns 0 for arrays with dynamic bash constructs (command substitution,
 /// array expansion) since static token counting would be unreliable.
 fn count_array_entries(content: &str, array_name: &str) -> usize {
-    let pattern = format!(r"(?ms)^{array_name}=\((.*?)\)");
+    let pattern = format!(r"(?ms)^{array_name}\s*=\s*\((.*?)\)");
     let re = Regex::new(&pattern).unwrap();
     let Some(caps) = re.captures(content) else {
         return 0;
@@ -186,12 +192,16 @@ mod tests {
             github_stars: None,
             github_not_found: false,
             aur_comments: vec![],
-                    maintainer_info: None,
+            maintainer_info: None,
             has_orphan_takeover: false,
             has_new_malicious_diff: false,
             npm_info: None,
         };
-        ChecksumAnalysis.analyze(&ctx).iter().map(|s| s.id.clone()).collect()
+        ChecksumAnalysis
+            .analyze(&ctx)
+            .iter()
+            .map(|s| s.id.clone())
+            .collect()
     }
 
     fn has(ids: &[String], id: &str) -> bool {
@@ -200,13 +210,19 @@ mod tests {
 
     #[test]
     fn no_checksums() {
-        let ids = analyze("test-pkg", "pkgname=test\nsource=('https://example.com/a.tar.gz')\n");
+        let ids = analyze(
+            "test-pkg",
+            "pkgname=test\nsource=('https://example.com/a.tar.gz')\n",
+        );
         assert!(has(&ids, "P-NO-CHECKSUMS"));
     }
 
     #[test]
     fn skip_all() {
-        let ids = analyze("test-pkg", "pkgname=test\nsource=('https://example.com/a.tar.gz')\nsha256sums=('SKIP')\n");
+        let ids = analyze(
+            "test-pkg",
+            "pkgname=test\nsource=('https://example.com/a.tar.gz')\nsha256sums=('SKIP')\n",
+        );
         assert!(has(&ids, "P-SKIP-ALL"));
     }
 
@@ -218,31 +234,57 @@ mod tests {
 
     #[test]
     fn checksum_mismatch() {
-        let ids = analyze("test-pkg", "pkgname=test\nsource=('a.tar.gz' 'b.tar.gz')\nsha256sums=('abc123')\n");
+        let ids = analyze(
+            "test-pkg",
+            "pkgname=test\nsource=('a.tar.gz' 'b.tar.gz')\nsha256sums=('abc123')\n",
+        );
         assert!(has(&ids, "P-CHECKSUM-MISMATCH"));
     }
 
     #[test]
     fn vcs_skip_not_flagged() {
         let ids = analyze("tool-git", "pkgname=tool-git\nsource=('git+https://github.com/user/tool.git')\nsha256sums=('SKIP')\n");
-        assert!(!has(&ids, "P-SKIP-ALL"), "VCS package should not flag SKIP checksums");
-        assert!(!has(&ids, "P-NO-CHECKSUMS"), "VCS package should not flag missing checksums");
+        assert!(
+            !has(&ids, "P-SKIP-ALL"),
+            "VCS package should not flag SKIP checksums"
+        );
+        assert!(
+            !has(&ids, "P-NO-CHECKSUMS"),
+            "VCS package should not flag missing checksums"
+        );
     }
 
     #[test]
     fn strong_checksum_no_weak_flag() {
-        let ids = analyze("test-pkg", "pkgname=test\nsource=('a.tar.gz')\nsha256sums=('abc123')\n");
+        let ids = analyze(
+            "test-pkg",
+            "pkgname=test\nsource=('a.tar.gz')\nsha256sums=('abc123')\n",
+        );
         assert!(!has(&ids, "P-WEAK-CHECKSUMS"));
     }
 
     // --- Arch-specific array false positive regression ---
 
     #[test]
+    fn checksum_rename_syntax_counts_as_one_source() {
+        let ids = analyze(
+            "flutter-bin",
+            "source=(\"flutter.tar.xz\"::\"https://example.com/flutter.tar.xz\")\nmd5sums=('hash')\n",
+        );
+        assert!(
+            !has(&ids, "P-CHECKSUM-MISMATCH"),
+            "filename::url source syntax should count as one entry, got: {ids:?}"
+        );
+    }
+
+    #[test]
     fn checksum_mismatch_points_and_wording() {
         let ctx = PackageContext {
             name: "test-pkg".into(),
             metadata: None,
-            pkgbuild_content: Some("source=('a.tar.gz' 'b.tar.gz')\nsha256sums=('abc123')\n".into()),
+            pkgbuild_content: Some(
+                "source=('a.tar.gz' 'b.tar.gz')\nsha256sums=('abc123')\n".into(),
+            ),
             install_script_content: None,
             prior_pkgbuild_content: None,
             git_log: vec![],
@@ -250,48 +292,100 @@ mod tests {
             github_stars: None,
             github_not_found: false,
             aur_comments: vec![],
-                    maintainer_info: None,
+            maintainer_info: None,
             has_orphan_takeover: false,
             has_new_malicious_diff: false,
             npm_info: None,
         };
         let signals = ChecksumAnalysis.analyze(&ctx);
-        let mismatch = signals.iter().find(|s| s.id == "P-CHECKSUM-MISMATCH").unwrap();
+        let mismatch = signals
+            .iter()
+            .find(|s| s.id == "P-CHECKSUM-MISMATCH")
+            .unwrap();
         assert_eq!(mismatch.points, 25);
-        assert!(mismatch.description.contains("checksum count mismatch"));
+        assert!(mismatch
+            .description
+            .contains("Checksum coverage needs review"));
     }
 
     #[test]
     fn checksum_arch_specific_no_mismatch() {
         let ids = analyze("test-pkg", "source=('a.tar.gz' 'b.patch')\nsource_x86_64=('c.tar.gz')\nsha256sums=('hash1' 'hash2')\nsha256sums_x86_64=('hash3')\n");
-        assert!(!has(&ids, "P-CHECKSUM-MISMATCH"), "Arch-specific arrays should not cause mismatch, got: {ids:?}");
+        assert!(
+            !has(&ids, "P-CHECKSUM-MISMATCH"),
+            "Arch-specific arrays should not cause mismatch, got: {ids:?}"
+        );
     }
 
     #[test]
     fn checksum_arch_specific_real_mismatch() {
-        let ids = analyze("test-pkg", "source=('a.tar.gz' 'b.patch')\nsha256sums=('hash1')\n");
+        let ids = analyze(
+            "test-pkg",
+            "source=('a.tar.gz' 'b.patch')\nsha256sums=('hash1')\n",
+        );
         assert!(has(&ids, "P-CHECKSUM-MISMATCH"));
     }
 
     #[test]
     fn arch_only_checksums_no_false_no_checksums() {
         // Package with only arch-specific checksum arrays should NOT fire P-NO-CHECKSUMS
-        let ids = analyze("test-bin", "source_x86_64=('a.tar.gz')\nsha256sums_x86_64=('hash1')\n");
-        assert!(!has(&ids, "P-NO-CHECKSUMS"), "arch-specific checksums should count, got: {ids:?}");
+        let ids = analyze(
+            "test-bin",
+            "source_x86_64=('a.tar.gz')\nsha256sums_x86_64=('hash1')\n",
+        );
+        assert!(
+            !has(&ids, "P-NO-CHECKSUMS"),
+            "arch-specific checksums should count, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn architecture_specific_all_skip_is_detected() {
+        let ids = analyze(
+            "test-bin",
+            "source_x86_64=('x86.tar.gz')\nsource_aarch64=('arm.tar.gz')\nsha256sums_x86_64=('SKIP')\nsha256sums_aarch64=('SKIP')\n",
+        );
+        assert!(has(&ids, "P-SKIP-ALL"));
+        assert!(!has(&ids, "P-CHECKSUM-MISMATCH"));
+    }
+
+    #[test]
+    fn mixed_skip_entries_are_not_all_skip_or_mismatched() {
+        let ids = analyze(
+            "test-pkg",
+            "source=('a.tar.gz' 'b.tar.gz')\nsha256sums=('SKIP' 'hash')\n",
+        );
+        assert!(!has(&ids, "P-SKIP-ALL"));
+        assert!(!has(&ids, "P-CHECKSUM-MISMATCH"));
+    }
+
+    #[test]
+    fn spaced_array_assignments_are_counted() {
+        let ids = analyze(
+            "test-pkg",
+            "source_x86_64 = ('a.tar.gz' 'b.tar.gz')\nsha384sums_x86_64 = ('hash')\n",
+        );
+        assert!(has(&ids, "P-CHECKSUM-MISMATCH"));
     }
 
     #[test]
     fn dynamic_source_array_no_mismatch() {
         // source uses bash array expansion — static counting is unreliable, skip mismatch
         let ids = analyze("test-pkg", "source=(\"$_iso\"\n  \"${_fonts[@]/#/file://}\"\n  file://license.rtf)\nsha256sums=('hash1' 'hash2' 'hash3')\n");
-        assert!(!has(&ids, "P-CHECKSUM-MISMATCH"), "dynamic source array should not trigger mismatch, got: {ids:?}");
+        assert!(
+            !has(&ids, "P-CHECKSUM-MISMATCH"),
+            "dynamic source array should not trigger mismatch, got: {ids:?}"
+        );
     }
 
     #[test]
     fn dynamic_checksum_array_no_mismatch() {
         // sha256sums uses command substitution — static counting is unreliable, skip mismatch
         let ids = analyze("test-pkg", "source=('a.tar.gz' 'b.tar.gz')\nsha256sums=($(awk \"BEGIN{for(c=0;c<2;c++) printf \\\"SKIP\\n\\\"}\"))\n");
-        assert!(!has(&ids, "P-CHECKSUM-MISMATCH"), "dynamic checksum array should not trigger mismatch, got: {ids:?}");
+        assert!(
+            !has(&ids, "P-CHECKSUM-MISMATCH"),
+            "dynamic checksum array should not trigger mismatch, got: {ids:?}"
+        );
     }
 
     #[test]
@@ -314,7 +408,13 @@ mod tests {
             npm_info: None,
         };
         let signals = ChecksumAnalysis.analyze(&ctx);
-        let mismatch_count = signals.iter().filter(|s| s.id == "P-CHECKSUM-MISMATCH").count();
-        assert_eq!(mismatch_count, 1, "should emit exactly one mismatch signal, got {mismatch_count}");
+        let mismatch_count = signals
+            .iter()
+            .filter(|s| s.id == "P-CHECKSUM-MISMATCH")
+            .count();
+        assert_eq!(
+            mismatch_count, 1,
+            "should emit exactly one mismatch signal, got {mismatch_count}"
+        );
     }
 }

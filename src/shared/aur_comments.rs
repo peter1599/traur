@@ -119,8 +119,8 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
     };
     let yoe = (y - era * 400) as u32; // year of era [0, 399]
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1; // day of year [0, 365]
-    let doe = (yoe as i64) * 365 + (yoe as i64) / 4 - (yoe as i64) / 100 + doy as i64;
-    let epoch_days = era as i64 * 146097 + doe - 719468;
+    let doe = (yoe as i64) * 365 + (yoe as i64) / 4 - (yoe as i64) / 100 + doy;
+    let epoch_days = era * 146097 + doe - 719468;
     Some(epoch_days)
 }
 

@@ -199,7 +199,13 @@ fn cmd_scan_all_installed(jobs: usize, json: bool, verbose: bool, flagged_only: 
     };
 
     eprintln!("  Fetching package metadata for {} installed packages...", names.len());
-    let metadata = batch_fetch_metadata(&names);
+    let metadata = match batch_fetch_metadata(&names) {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            eprintln!("Error fetching package metadata: {e}");
+            return 1;
+        }
+    };
     let not_found: Vec<&str> = names
         .iter()
         .filter(|n| !metadata.contains_key(n.as_str()))
@@ -286,7 +292,7 @@ fn cmd_scan_all_installed(jobs: usize, json: bool, verbose: bool, flagged_only: 
     let scanned = total - errors;
 
     if json {
-        flagged.sort_by(|a, b| a.score.cmp(&b.score));
+        flagged.sort_by_key(|a| a.score);
         let json_str = serde_json::to_string_pretty(&flagged).expect("Failed to serialize");
         println!("{json_str}");
     } else {
@@ -303,7 +309,7 @@ fn cmd_scan_all_installed(jobs: usize, json: bool, verbose: bool, flagged_only: 
         );
 
         if !flagged.is_empty() {
-            flagged.sort_by(|a, b| a.score.cmp(&b.score));
+            flagged.sort_by_key(|a| a.score);
             println!();
             println!(
                 "{}",

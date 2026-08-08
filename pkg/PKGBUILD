@@ -35,6 +35,7 @@ package() {
     cd "$pkgname-$pkgver"
     install -Dm0755 target/release/traur "$pkgdir/usr/bin/traur"
     install -Dm0755 target/release/traur-hook "$pkgdir/usr/bin/traur-hook"
+    install -Dm0755 scripts/traur-makepkg "$pkgdir/usr/bin/traur-makepkg"
     install -Dm0644 hook/traur.hook "$pkgdir/usr/share/libalpm/hooks/traur.hook"
     install -Dm0644 data/patterns.toml "$pkgdir/usr/share/traur/patterns.toml"
     install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

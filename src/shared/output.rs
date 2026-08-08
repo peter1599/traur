@@ -49,11 +49,10 @@ pub fn write_text(w: &mut dyn Write, result: &ScanResult, verbose: bool) {
                 "    {prefix} {}: {}",
                 signal.id, signal.description
             );
-            if verbose {
-                if let Some(ref line) = signal.matched_line {
+            if verbose
+                && let Some(ref line) = signal.matched_line {
                     let _ = writeln!(w, "         {} {}", ">".dimmed(), line.dimmed());
                 }
-            }
         }
     }
 }

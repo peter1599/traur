@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 /// PKGBUILD standard variables that should not be tracked for obfuscation.
-const PKGBUILD_STANDARD_VARS: &[&str] = &[
+const PKGBUILD_STANDARD_VARS: &[&str; 43] = &[
     "pkgname", "pkgver", "pkgrel", "epoch", "pkgdesc", "arch", "url", "license",
     "groups", "depends", "makedepends", "checkdepends", "optdepends", "provides",
     "conflicts", "replaces", "backup", "options", "install", "changelog", "source",
@@ -20,13 +20,13 @@ const PKGBUILD_STANDARD_VARS: &[&str] = &[
 ];
 
 /// Commands that indicate malicious intent when reconstructed via obfuscation.
-const DANGEROUS_COMMANDS: &[&str] = &[
+const DANGEROUS_COMMANDS: &[&str; 15] = &[
     "curl", "wget", "nc", "ncat", "bash", "sh", "python", "python3", "python2",
     "perl", "ruby", "php", "lua", "socat", "telnet",
 ];
 
 /// Download-and-execute compound patterns: (downloader, executor).
-const DANGEROUS_PIPES: &[(&str, &str)] = &[
+const DANGEROUS_PIPES: &[(&str, &str); 8] = &[
     ("curl", "bash"),
     ("curl", "sh"),
     ("curl", "python"),
@@ -38,7 +38,7 @@ const DANGEROUS_PIPES: &[(&str, &str)] = &[
 ];
 
 /// Build tool commands whose presence indicates legitimate compilation.
-const BUILD_COMMANDS: &[&str] = &[
+const BUILD_COMMANDS: &[&str; 21] = &[
     "make", "cmake", "cargo", "gcc", "g++", "go build", "go install", "rustc",
     "javac", "mvn", "gradle", "meson", "ninja", "configure", "python setup.py",
     "pip install", "npm run build", "yarn build", "qmake", "scons", "waf",
@@ -151,7 +151,9 @@ fn build_var_env(content: &str) -> HashMap<String, String> {
 
     for line in content.lines() {
         for caps in ASSIGN_RE.captures_iter(line) {
-            let name = &caps[1];
+            let Some(name) = caps.get(1).map(|m| m.as_str()) else {
+                continue;
+            };
             if standard.contains(name) {
                 continue;
             }
@@ -173,10 +175,12 @@ fn build_var_env(content: &str) -> HashMap<String, String> {
 fn resolve_variables(line: &str, env: &HashMap<String, String>) -> String {
     VAR_REF_RE
         .replace_all(line, |caps: &regex::Captures| {
-            let name = &caps[1];
-            env.get(name)
-                .cloned()
-                .unwrap_or_else(|| caps[0].to_string())
+            let name = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+            env.get(name).cloned().unwrap_or_else(|| {
+                caps.get(0)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default()
+            })
         })
         .to_string()
 }
@@ -205,20 +209,60 @@ fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Check if `word` appears in `text` at a word boundary (not as a substring of a larger token).
-fn has_word_match(text: &str, word: &str) -> bool {
+/// Return the byte offset of `word` in `text` when it is a whole word.
+fn find_word_match(text: &str, word: &str) -> Option<usize> {
     let mut start = 0;
-    while let Some(pos) = text[start..].find(word) {
+    while let Some(pos) = text.get(start..).and_then(|tail| tail.find(word)) {
         let abs_pos = start + pos;
         let before_ok = abs_pos == 0 || !is_word_char(text.as_bytes()[abs_pos - 1]);
         let end_pos = abs_pos + word.len();
         let after_ok = end_pos >= text.len() || !is_word_char(text.as_bytes()[end_pos]);
         if before_ok && after_ok {
-            return true;
+            return Some(abs_pos);
         }
         start = abs_pos + 1;
     }
-    false
+    None
+}
+
+/// Check if `word` appears in `text` at a word boundary (not as a substring of a larger token).
+fn has_word_match(text: &str, word: &str) -> bool {
+    find_word_match(text, word).is_some()
+}
+
+fn is_command_position(text: &str, match_start: usize) -> bool {
+    let before = text.get(..match_start).unwrap_or(text);
+    let command_prefix = before
+        .rsplit([';', '|', '&'])
+        .next()
+        .unwrap_or(before);
+    command_prefix.trim().is_empty()
+}
+
+fn find_command_position_match(text: &str, word: &str) -> Option<usize> {
+    let mut start = 0;
+    while let Some(pos) = text.get(start..).and_then(|tail| tail.find(word)) {
+        let abs_pos = start + pos;
+        let before_ok = abs_pos == 0 || !is_word_char(text.as_bytes()[abs_pos - 1]);
+        let end_pos = abs_pos + word.len();
+        let after_ok = end_pos >= text.len() || !is_word_char(text.as_bytes()[end_pos]);
+        if before_ok && after_ok && is_command_position(text, abs_pos) {
+            return Some(abs_pos);
+        }
+        start = abs_pos + 1;
+    }
+    None
+}
+
+fn has_multiple_known_variable_refs(original: &str, env: &HashMap<String, String>) -> bool {
+    let mut names = HashSet::new();
+    for caps in VAR_REF_RE.captures_iter(original) {
+        let name = &caps[1];
+        if env.contains_key(name) {
+            names.insert(name.to_string());
+        }
+    }
+    names.len() >= 2
 }
 
 /// Check if a resolved line contains a dangerous command assembled from multiple variables.
@@ -228,12 +272,18 @@ fn contains_multi_var_dangerous_cmd(
     resolved: &str,
     env: &HashMap<String, String>,
 ) -> Option<&'static str> {
+    if !has_multiple_known_variable_refs(original, env) {
+        return None;
+    }
+
     let orig_lower = original.to_lowercase();
     let res_lower = resolved.to_lowercase();
     DANGEROUS_COMMANDS
         .iter()
         .find(|&&cmd| {
-            if !has_word_match(&res_lower, cmd) || has_word_match(&orig_lower, cmd) {
+            if find_command_position_match(&res_lower, cmd).is_none()
+                || has_word_match(&orig_lower, cmd)
+            {
                 return false;
             }
             // Skip if any single variable already holds this command —
@@ -646,6 +696,24 @@ mod tests {
     fn var_concat_single_var_sh_no_signal() {
         let ids = analyze("_shell=sh\n$_shell -c 'echo hello'");
         assert!(!has(&ids, "SA-VAR-CONCAT-CMD"), "single var sh should not fire, got: {ids:?}");
+    }
+
+    #[test]
+    fn var_concat_literal_suffix_no_signal() {
+        let ids = analyze("_py=python\n${_py}3 -m build");
+        assert!(
+            !has(&ids, "SA-VAR-CONCAT-CMD"),
+            "one variable plus literal suffix should not fire, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn var_concat_in_argument_no_signal() {
+        let ids = analyze("a=py\nb=thon\necho \"$a$b\"");
+        assert!(
+            !has(&ids, "SA-VAR-CONCAT-CMD"),
+            "dangerous word used as argument should not fire, got: {ids:?}"
+        );
     }
 
     #[test]
